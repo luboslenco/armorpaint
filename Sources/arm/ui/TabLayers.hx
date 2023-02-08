@@ -613,7 +613,6 @@ class TabLayers {
 			if (l.isMask() && ui.button(tr("Apply"), Left)) {
 				function _init() {
 					Context.layer = l;
-					History.applyMask();
 					l.applyMask();
 					Context.setLayer(l.parent);
 					MakeMaterial.parseMeshMaterial();
@@ -631,7 +630,6 @@ class TabLayers {
 			if (ui.button(tr("Merge Down"), Left)) {
 				function _init() {
 					Context.setLayer(l);
-					History.mergeLayers();
 					Layers.mergeDown();
 					if (Context.layer.fill_layer != null) Context.layer.toPaintLayer();
 				}

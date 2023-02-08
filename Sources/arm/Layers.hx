@@ -433,25 +433,45 @@ class Layers {
 	public static function applyMasks(l: LayerSlot) {
 		var masks = l.getMasks();
 
-		if (masks != null) {
-			for (i in 0...masks.length - 1) {
-				mergeLayer(masks[i + 1], masks[i]);
-				masks[i].delete();
-			}
-			masks[masks.length - 1].applyMask();
-			Context.layerPreviewDirty = true;
+		if (masks == null) {
+			return;
 		}
+
+		History.beginApplyMasks();
+
+		// Copy masks before merging them
+		for (i in 0...masks.length - 1) {
+			History.deleteLayer2(masks[i]);
+		}
+
+		for (i in 0...masks.length - 1) {
+			mergeLayer(masks[i + 1], masks[i]);
+			masks[i].delete();
+		}
+
+		// Apply the merged mask. 
+		// This will also record all neccessary steps to restore the layer on undo
+		// (and also will remove the merged mask)
+		masks[masks.length - 1].applyMask();
+
+		History.end();
+
+		Context.layerPreviewDirty = true;
 	}
 
 	public static function mergeDown() {
+		History.beginMergeLayers();
+		
 		var l1 = Context.layer;
 
 		if (l1.isGroup()) {
 			l1 = mergeGroup(l1);
 		}
-		else if (l1.hasMasks()) { // It is a layer
-			applyMasks(l1);
-			Context.setLayer(l1);
+		else { // It is a layer
+			if (l1.hasMasks()) { 
+				applyMasks(l1);
+				Context.setLayer(l1);
+			}
 		}
 
 		var l0 = Project.layers[Project.layers.indexOf(l1) - 1];
@@ -459,20 +479,40 @@ class Layers {
 		if (l0.isGroup()) {
 			l0 = mergeGroup(l0);
 		}
-		else if (l0.hasMasks()) { // It is a layer
-			applyMasks(l0);
-			Context.setLayer(l0);
+		else {
+			// This should be done _before_ History.newLayer (or strange things will happen).
+			// Undoing of applyMasks should happen before History.newLayer, because the undo 
+			// steps are executed in reverse order.
+			if (l0.hasMasks()) {
+				applyMasks(l0);
+				Context.setLayer(l0);
+			}
+
+			// Back up layer l0 as it will be used as a combined layer,
+			// but we also want to delete the combined layer on undo.
+			History.deleteLayer2(l0);
+
+			// Only delete the combined layer on undo if it wasn't a group, because if it was a group 
+			// the undo logic for "Merge Group" will delete it automatically (because it deletes the 
+			// layer that was the result of merging the group).
+			History.newLayer2(l0);
 		}
 
 		mergeLayer(l0, l1);
+		History.deleteLayer2(l1);
 		l1.delete();
+		
 		Context.setLayer(l0);
+		
+		History.end();
+		
 		Context.layerPreviewDirty = true;
 	}
 
 	public static function mergeGroup(l: LayerSlot) {
 		if (!l.isGroup()) return null;
 
+		History.beginMergeGroup();
 		var children = l.getChildren();
 
 		if (children.length == 1 && children[0].hasMasks(false)) {
@@ -481,7 +521,6 @@ class Layers {
 
 		for (i in 0...children.length - 1) {
 			Context.setLayer(children[children.length - 1 - i]);
-			History.mergeLayers();
 			Layers.mergeDown();
 		}
 
@@ -489,16 +528,32 @@ class Layers {
 		var masks = l.getMasks();
 		if (masks != null) {
 			for (i in 0...masks.length - 1) {
+				// TODO: preserve the masks for undo with History.deleteLayer2(masks[i]);
 				mergeLayer(masks[i + 1], masks[i]);
 				masks[i].delete();
 			}
 			Layers.applyMask(children[0], masks[masks.length - 1]);
 		}
 
+		if (children.length == 1) {
+			// A special case: the group only has one child. Because of that, it won't be
+			// saved to history in the `for` cycle just above where we merge down all the 
+			// children. Which is why we have to save it here manually.
+			History.deleteLayer2(children[0]);
+
+			// But then we also need to delete it, because it won't be deleted by 
+			// undoing "Merge Layers" (since we never called "Merge Layers" in this case).
+			History.newLayer2(children[0]);
+		}
 		children[0].parent = null;
 		children[0].name = l.name;
 		if (children[0].fill_layer != null) children[0].toPaintLayer();
+		
+		History.deleteLayer2(l);
 		l.delete();
+
+		History.end();
+		
 		return children[0];
 	}
 

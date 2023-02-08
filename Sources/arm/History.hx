@@ -12,6 +12,7 @@ import arm.data.LayerSlot;
 import arm.data.MaterialSlot;
 import arm.node.MakeMaterial;
 import arm.Enums;
+import haxe.ds.GenericStack;
 
 class History {
 
@@ -21,218 +22,198 @@ class History {
 	public static var redos = 0; // Redos available
 	public static var pushUndo = false; // Store undo on next paint
 	public static var undoLayers: Array<LayerSlot> = null;
+	public static var stepStack: GenericStack<TStep>;
 
 	public static function undo() {
-		if (undos > 0) {
-			var active = steps.length - 1 - redos;
-			var step = steps[active];
+		if (undos == 0)
+			return;
 
-			if (step.name == tr("New Layer") || step.name == tr("New Black Mask") || step.name == tr("New White Mask") || step.name == tr("New Fill Mask")) {
-				Context.layer = Project.layers[step.layer];
-				Context.layer.delete();
-				Context.layer = Project.layers[step.layer > 0 ? step.layer - 1 : 0];
-			}
-			else if (step.name == tr("New Group")) {
-				Context.layer = Project.layers[step.layer];
-				// The layer below is the only layer in the group. Its layer masks are automatically unparented, too.
-				Project.layers[step.layer - 1].parent = null;
-				Context.layer.delete();
-				Context.layer = Project.layers[step.layer > 0 ? step.layer - 1 : 0];
-			}
-			else if (step.name == tr("Delete Layer")) {
-				var parent = step.layer_parent > 0 ? Project.layers[step.layer_parent - 1] : null;
-				var l = new LayerSlot("", step.layer_type, parent);
-				Project.layers.insert(step.layer, l);
-				Context.setLayer(l);
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				l.swap(lay);
-				l.maskOpacity = step.layer_opacity;
-				l.blending = step.layer_blending;
-				l.objectMask = step.layer_object;
-				MakeMaterial.parseMeshMaterial();
+		var active = steps.length - 1 - redos;
 
-				// Undo at least second time in order to avoid empty groups
-				if (step.layer_type == LayerSlotType.SlotGroup) {
-					App.notifyOnNextFrame(function() {
-						// 1. Undo deleting group masks
-						var n = 1;
-						while (steps[active - n].layer_type == LayerSlotType.SlotMask) {
-							undo();
-							++n;
-						}
-						// 2. Undo a mask to have a non empty group
-						undo();
-					});
-				}
-			}
-			else if (step.name == tr("Clear Layer")) {
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.layer.swap(lay);
-				Context.layerPreviewDirty = true;
-			}
-			else if (step.name == tr("Duplicate Layer")) {
-				var children = Project.layers[step.layer].getRecursiveChildren();
-				var position = step.layer + 1;
-				if (children != null)
-					position += children.length;
+		undoInternal(active);
+	}
 
-				Context.layer = Project.layers[position];
-				Context.layer.delete();
-			}
-			else if (step.name == tr("Order Layers")) {
-				var target = Project.layers[step.prev_order];
-				Project.layers[step.prev_order] = Project.layers[step.layer];
-				Project.layers[step.layer] = target;
-			}
-			else if (step.name == tr("Merge Layers")) {
-				Context.layer = Project.layers[step.layer];
-				Context.layer.delete();
+	public static function undoInternal(active: Int): Int {
+		var step = steps[active];
+		var numChildrenTotal = 0;
 
-				var parent = step.layer_parent > 0 ? Project.layers[step.layer_parent - 2] : null;
-				var l = new LayerSlot("", step.layer_type, parent);
-				Project.layers.insert(step.layer, l);
-				Context.setLayer(l);
-
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.layer.swap(lay);
-
-				var l = new LayerSlot("", step.layer_type, parent);
-				Project.layers.insert(step.layer + 1, l);
-				Context.setLayer(l);
-
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.layer.swap(lay);
-
-				Context.layer.maskOpacity = step.layer_opacity;
-				Context.layer.blending = step.layer_blending;
-				Context.layer.objectMask = step.layer_object;
-				Context.layersPreviewDirty = true;
-				MakeMaterial.parseMeshMaterial();
-			}
-			else if (step.name == tr("Apply Mask")) {
-				// First restore the layer(s)
-				var maskPosition = step.layer;
-				var currentLayer = null;
-				// The layer at the old mask position is a mask, i.e. the layer had multiple masks before.
-				if (Project.layers[maskPosition].isMask())
-					currentLayer = Project.layers[maskPosition].parent;
-				else if (Project.layers[maskPosition].isLayer() || Project.layers[maskPosition].isGroup())
-					currentLayer = Project.layers[maskPosition];
- 
-				var layersToRestore = currentLayer.isGroup() ? currentLayer.getChildren() : [currentLayer];
-				layersToRestore.reverse();
-
-				for (layer in layersToRestore) {
-					// Replace the current layer's content with the old one
-					Context.layer = layer;
-					undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-					var oldLayer = undoLayers[undoI];
-					Context.layer.swap(oldLayer);
-				}
-
-				// Now restore the applied mask
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var mask = undoLayers[undoI];
-				Layers.newMask(false, currentLayer, maskPosition);
-				Context.layer.swap(mask);
-				Context.layersPreviewDirty = true;
-				Context.setLayer(Context.layer);
-			}
-			else if (step.name == tr("Invert Mask")) {
-				function _next() {
-					Context.layer = Project.layers[step.layer];
-					Context.layer.invertMask();
-				}
-				iron.App.notifyOnInit(_next);
-			}
-			else if (step.name == "Apply Filter") {
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.setLayer(Project.layers[step.layer]);
-				Context.layer.swap(lay);
-				Layers.newMask(false, Context.layer);
-				Context.layer.swap(lay);
-				Context.layerPreviewDirty = true;
-			}
-			else if (step.name == tr("To Fill Layer") || step.name == tr("To Fill Mask")) {
-				Context.layer.toPaintLayer();
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.layer.swap(lay);
-			}
-			else if (step.name == tr("To Paint Layer") || step.name == tr("To Paint Mask")) {
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.layer.swap(lay);
-				Context.layer.fill_layer = Project.materials[step.material];
-			}
-			else if (step.name == tr("Layer Opacity")) {
-				Context.setLayer(Project.layers[step.layer]);
-				var t = Context.layer.maskOpacity;
-				Context.layer.maskOpacity = step.layer_opacity;
-				step.layer_opacity = t;
-				MakeMaterial.parseMeshMaterial();
-			}
-			else if (step.name == tr("Layer Blending")) {
-				Context.setLayer(Project.layers[step.layer]);
-				var t = Context.layer.blending;
-				Context.layer.blending = step.layer_blending;
-				step.layer_blending = t;
-				MakeMaterial.parseMeshMaterial();
-			}
-			else if (step.name == tr("Edit Nodes")) {
-				swapCanvas(step);
-			}
-			else if (step.name == tr("Delete Node Group")) {
-				Project.materialGroups.insert(step.canvas_group, { canvas: null, nodes: new Nodes() });
-				swapCanvas(step);
-			}
-			else if (step.name == tr("New Material")) {
-				Context.material = Project.materials[step.material];
-				step.canvas = Context.material.canvas;
-				Context.material.delete();
-			}
-			else if (step.name == tr("Delete Material")) {
-				Context.material = new MaterialSlot(Project.materials[0].data);
-				Project.materials.insert(step.material, Context.material);
-				Context.material.canvas = step.canvas;
-				UINodes.inst.canvasChanged();
-				@:privateAccess UINodes.inst.getNodes().handle = new zui.Zui.Handle();
-				UINodes.inst.hwnd.redraws = 2;
-			}
-			else if (step.name == tr("Duplicate Material")) {
-				Context.material = Project.materials[step.material];
-				step.canvas = Context.material.canvas;
-				Context.material.delete();
-			}
-			else { // Paint operation
-				undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
-				var lay = undoLayers[undoI];
-				Context.selectPaintObject(Project.paintObjects[step.object]);
-				Context.setLayer(Project.layers[step.layer]);
-				Context.layer.swap(lay);
-				Context.layerPreviewDirty = true;
-			}
-			undos--;
-			redos++;
-			UISidebar.inst.hwnd0.redraws = 2;
-			UISidebar.inst.hwnd1.redraws = 2;
-			Context.ddirty = 2;
-			if (UIView2D.inst.show) UIView2D.inst.hwnd.redraws = 2;
+		#if arm_debug
+		trace('Undoing step:${active} name:"${step.name}" layer:${step.layer} layer_parent:${step.layer_parent}');
+		trace('Before:');
+		for (l in Project.layers) {
+			trace('    id:${l.id} parent:${l.parent != null ? l.parent.id : -1} name:"${l.name}"');
 		}
+		#end
+
+		if (step.name == tr("New Layer") || step.name == tr("New Black Mask") || step.name == tr("New White Mask") || step.name == tr("New Fill Mask")) {
+			Context.layer = LayerSlot.findById(step.layer_id);
+			Context.layer.delete();
+			Context.layer = Project.layers[step.layer > 0 ? step.layer - 1 : 0];
+		}
+		else if (step.name == tr("New Group")) {
+			Context.layer = LayerSlot.findById(step.layer_id);
+			// The layer below is the only layer in the group. Its layer masks are automatically unparented, too.
+			Project.layers[step.layer - 1].parent = null;
+			Context.layer.delete();
+			Context.layer = Project.layers[step.layer > 0 ? step.layer - 1 : 0];
+		}
+		else if (step.name == tr("Delete Layer")) {
+			var parent = step.layer_parent >= 0 ? LayerSlot.findById(step.layer_parent) : null;
+			var position = step.layer;
+			var l = new LayerSlot("", step.layer_type, parent, step.layer_id);
+			Project.layers.insert(position, l);
+			Context.setLayer(l);
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			l.swap(lay);
+			l.maskOpacity = step.layer_opacity;
+			l.blending = step.layer_blending;
+			l.objectMask = step.layer_object;
+			MakeMaterial.parseMeshMaterial();
+		}
+		else if (step.name == tr("Clear Layer")) {
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			Context.layer.swap(lay);
+			Context.layerPreviewDirty = true;
+		}
+		else if (step.name == tr("Duplicate Layer")) {
+			var children = Project.layers[step.layer].getRecursiveChildren();
+			var position = step.layer + 1;
+			if (children != null)
+				position += children.length;
+
+			Context.layer = Project.layers[position];
+			Context.layer.delete();
+		}
+		else if (step.name == tr("Order Layers")) {
+			var target = Project.layers[step.prev_order];
+			Project.layers[step.prev_order] = Project.layers[step.layer];
+			Project.layers[step.layer] = target;
+		}
+		else if (step.name == tr("Merge Layers") || step.name == tr("Merge Group") || step.name == tr("Apply Mask (internal)") || step.name == tr("Apply Masks")) {
+			// Each step can have more than one child and they may not be laid out
+			// sequentially since there could be more than one step in between them.
+			// This applies to _all_ children on all levels of nesting.
+			// So we need to take this into account when iterating over children by
+			// skipping all children of the nested steps.
+			for (i in 1...step.num_children + 1) {
+				numChildrenTotal += undoInternal(active - i - numChildrenTotal);
+			}
+		}
+		else if (step.name == tr("Apply Mask")) {
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			Context.setLayer(LayerSlot.findById(step.layer_id));
+			Context.layer.swap(lay);
+		}
+		else if (step.name == tr("Invert Mask")) {
+			function _next() {
+				Context.layer = Project.layers[step.layer];
+				Context.layer.invertMask();
+			}
+			iron.App.notifyOnInit(_next);
+		}
+		else if (step.name == "Apply Filter") {
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			Context.setLayer(Project.layers[step.layer]);
+			Context.layer.swap(lay);
+			Layers.newMask(false, Context.layer);
+			Context.layer.swap(lay);
+			Context.layerPreviewDirty = true;
+		}
+		else if (step.name == tr("To Fill Layer") || step.name == tr("To Fill Mask")) {
+			Context.layer.toPaintLayer();
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			Context.layer.swap(lay);
+		}
+		else if (step.name == tr("To Paint Layer") || step.name == tr("To Paint Mask")) {
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			Context.layer.swap(lay);
+			Context.layer.fill_layer = Project.materials[step.material];
+		}
+		else if (step.name == tr("Layer Opacity")) {
+			Context.setLayer(Project.layers[step.layer]);
+			var t = Context.layer.maskOpacity;
+			Context.layer.maskOpacity = step.layer_opacity;
+			step.layer_opacity = t;
+			MakeMaterial.parseMeshMaterial();
+		}
+		else if (step.name == tr("Layer Blending")) {
+			Context.setLayer(Project.layers[step.layer]);
+			var t = Context.layer.blending;
+			Context.layer.blending = step.layer_blending;
+			step.layer_blending = t;
+			MakeMaterial.parseMeshMaterial();
+		}
+		else if (step.name == tr("Edit Nodes")) {
+			swapCanvas(step);
+		}
+		else if (step.name == tr("Delete Node Group")) {
+			Project.materialGroups.insert(step.canvas_group, { canvas: null, nodes: new Nodes() });
+			swapCanvas(step);
+		}
+		else if (step.name == tr("New Material")) {
+			Context.material = Project.materials[step.material];
+			step.canvas = Context.material.canvas;
+			Context.material.delete();
+		}
+		else if (step.name == tr("Delete Material")) {
+			Context.material = new MaterialSlot(Project.materials[0].data);
+			Project.materials.insert(step.material, Context.material);
+			Context.material.canvas = step.canvas;
+			UINodes.inst.canvasChanged();
+			@:privateAccess UINodes.inst.getNodes().handle = new zui.Zui.Handle();
+			UINodes.inst.hwnd.redraws = 2;
+		}
+		else if (step.name == tr("Duplicate Material")) {
+			Context.material = Project.materials[step.material];
+			step.canvas = Context.material.canvas;
+			Context.material.delete();
+		}
+		else { // Paint operation
+			undoI = undoI - 1 < 0 ? Config.raw.undo_steps - 1 : undoI - 1;
+			var lay = undoLayers[undoI];
+			Context.selectPaintObject(Project.paintObjects[step.object]);
+			Context.setLayer(Project.layers[step.layer]);
+			Context.layer.swap(lay);
+			Context.layerPreviewDirty = true;
+		}
+		undos--;
+		redos++;
+		UISidebar.inst.hwnd0.redraws = 2;
+		UISidebar.inst.hwnd1.redraws = 2;
+		Context.ddirty = 2;
+		if (UIView2D.inst.show) UIView2D.inst.hwnd.redraws = 2;
+
+		#if arm_debug
+		trace('Done undoing step:${active} name:"${step.name}" layer:${step.layer} layer_parent:${step.layer_parent}');
+		trace('After:');
+		for (l in Project.layers) {
+			trace('    id:${l.id} parent:${l.parent != null ? l.parent.id : -1} name:"${l.name}"');
+		}
+		#end
+
+		// Return total number of steps consumed during execution of this method
+		// (including any steps consumed during recursion)
+		return numChildrenTotal + step.num_children;
 	}
 
 	public static function redo() {
 		if (redos > 0) {
 			var active = steps.length - redos;
+			while (steps[active].internal) {
+				active += 1;
+				undos++;
+				redos--;
+			}
 			var step = steps[active];
 
 			if (step.name == tr("New Layer") || step.name == tr("New Black Mask") || step.name == tr("New White Mask") || step.name == tr("New Fill Mask")) {
-				var parent = step.layer_parent > 0 ? Project.layers[step.layer_parent - 1] : null;
+				var parent = step.layer_parent > 0 ? LayerSlot.findById(step.layer_parent) : null;
 				var l = new LayerSlot("", step.layer_type, parent);
 				Project.layers.insert(step.layer, l);
 				if (step.name == tr("New Black Mask")) {
@@ -298,9 +279,14 @@ class History {
 				Project.layers[step.layer] = target;
 			}
 			else if (step.name == tr("Merge Layers")) {
-				Context.layer = Project.layers[step.layer + 1];
-				iron.App.notifyOnInit(redoMergeLayers);
+				Context.layer = Project.layers[step.layer];
 				iron.App.notifyOnInit(Layers.mergeDown);
+			}
+			else if (step.name == tr("Merge Group")) {
+				function _next() {
+					Layers.mergeGroup(Project.layers[step.layer]);
+				}
+				App.notifyOnNextFrame(_next);
 			}
 			else if (step.name == tr("Apply Mask")) {
 				Context.layer = Project.layers[step.layer];
@@ -407,10 +393,22 @@ class History {
 	}
 
 	public static function reset() {
-		steps = [{name: tr("New"), layer: 0, layer_type: SlotLayer, layer_parent: -1, object: 0, material: 0, brush: 0}];
+		steps = [{
+			name: tr("New"), 
+			internal: false, 
+			num_children: 0, 
+			layer: 0, 
+			layer_id: 0,
+			layer_type: SlotLayer, 
+			layer_parent: -1, 
+			object: 0, 
+			material: 0, 
+			brush: 0
+		}];
 		undos = 0;
 		redos = 0;
 		undoI = 0;
+		stepStack = new GenericStack<TStep>();
 	}
 
 	public static function paint() {
@@ -424,7 +422,11 @@ class History {
 	public static function newLayer() {
 		push(tr("New Layer"));
 	}
-	
+
+	public static function newLayer2(layer: LayerSlot) {
+		push(tr("New Layer"), layer);
+	}
+
 	public static function newBlackMask() {
 		push(tr("New Black Mask"));
 	}
@@ -450,6 +452,16 @@ class History {
 		push(tr("Delete Layer"));
 	}
 
+	public static function deleteLayer2(l: LayerSlot) {
+		swapActive2(l);
+		push(tr("Delete Layer"), l);
+	}
+
+	public static function applyMask(l: LayerSlot) {
+		swapActive2(l);
+		push(tr("Apply Mask"), l);
+	}
+
 	public static function clearLayer() {
 		swapActive();
 		push(tr("Clear Layer"));
@@ -460,31 +472,34 @@ class History {
 		step.prev_order = prevOrder;
 	}
 
-	public static function mergeLayers() {
-		copyMergingLayers();
-
-		var step = push(tr("Merge Layers"));
-		step.layer -= 1; // Merge down
-		if (Context.layer.hasMasks()) {
-			step.layer -= Context.layer.getMasks().length;
-		}
-		steps.shift(); // Merge consumes 2 steps
-		undos--;
+	public static function beginMergeLayers() {
+		begin(tr("Merge Layers"));
 		// TODO: use undo layer in Layers.mergeDown to save memory
 	}
 
-	public static function applyMask() {
-		if (Context.layer.isGroupMask()) {
-			var group = Context.layer.parent;
-			var layers = group.getChildren();
-			layers.insert(0, Context.layer);
-			copyMergingLayers2(layers);	
-		}
-		else copyMergingLayers2([Context.layer, Context.layer.parent]);
-		push(tr("Apply Mask"));
+	public static function beginMergeGroup() {
+		begin(tr("Merge Group"));
 	}
 
-	
+	public static function beginApplyMask() {
+		begin(tr("Apply Mask (internal)"));
+	}
+
+	public static function beginApplyMasks() {
+		begin(tr("Apply Masks"));
+	}
+
+	// public static function applyMask() {
+	// 	if (Context.layer.isGroupMask()) {
+	// 		var group = Context.layer.parent;
+	// 		var layers = group.getChildren();
+	// 		layers.insert(0, Context.layer);
+	// 		copyMergingLayers2(layers);	
+	// 	}
+	// 	else copyMergingLayers2([Context.layer, Context.layer.parent]);
+	// 	push(tr("Apply Mask"));
+	// }
+
 	public static function invertMask() {
 		push(tr("Invert Mask"));
 	}
@@ -559,7 +574,7 @@ class History {
 		step.canvas = haxe.Json.parse(haxe.Json.stringify(group.canvas));
 	}
 
-	static function push(name: String): TStep {
+	static function push(name: String, layer: LayerSlot = null): TStep {
 		#if (krom_windows || krom_linux || krom_darwin)
 		var filename = Project.filepath == "" ? UIFiles.filename : Project.filepath.substring(Project.filepath.lastIndexOf(Path.sep) + 1, Project.filepath.length - 4);
 		kha.Window.get(0).title = filename + "* - " + Main.title;
@@ -571,26 +586,68 @@ class History {
 			redos = 0;
 		}
 
-		var opos = Project.paintObjects.indexOf(Context.paintObject);
-		var lpos = Project.layers.indexOf(Context.layer);
-		var mpos = Project.materials.indexOf(Context.material);
-		var bpos = Project.brushes.indexOf(Context.brush);
+		steps.push(prepareStep(name, layer));
 
-		steps.push({
-			name: name,
-			layer: lpos,
-			layer_type: Context.layer.isMask() ? SlotMask : Context.layer.isGroup() ? SlotGroup : SlotLayer,
-			layer_parent: Context.layer.parent == null ? -1 : Project.layers.indexOf(Context.layer.parent),
-			object: opos,
-			material: mpos,
-			brush: bpos,
-			layer_opacity: Context.layer.maskOpacity,
-			layer_object: Context.layer.objectMask,
-			layer_blending: Context.layer.blending
-		});
+		if (!stepStack.isEmpty()) {
+			stepStack.first().num_children += 1;
+		}
 
 		while (steps.length > Config.raw.undo_steps + 1) steps.shift();
 		return steps[steps.length - 1];
+	}
+
+	static function push2(step: TStep) {
+		#if (krom_windows || krom_linux || krom_darwin)
+		var filename = Project.filepath == "" ? UIFiles.filename : Project.filepath.substring(Project.filepath.lastIndexOf(Path.sep) + 1, Project.filepath.length - 4);
+		kha.Window.get(0).title = filename + "* - " + Main.title;
+		#end
+
+		if (undos < Config.raw.undo_steps) undos++;
+		if (redos > 0) {
+			for (i in 0...redos) steps.pop();
+			redos = 0;
+		}
+
+		steps.push(step);
+
+		if (!stepStack.isEmpty()) {
+			stepStack.first().num_children += 1;
+		}
+
+		while (steps.length > Config.raw.undo_steps + 1) steps.shift();
+		return steps[steps.length - 1];
+	}
+
+	static function prepareStep(name: String, layer: LayerSlot = null): TStep {
+		var internal = !stepStack.isEmpty();
+		if (layer == null) {
+			layer = Context.layer;
+		}
+		
+		var opos = Project.paintObjects.indexOf(Context.paintObject);
+		var lpos = Project.layers.indexOf(layer);
+		var mpos = Project.materials.indexOf(Context.material);
+		var bpos = Project.brushes.indexOf(Context.brush);
+		
+		var layer_type = layer.isMask() ? SlotMask : layer.isGroup() ? SlotGroup : SlotLayer;
+
+		var step: TStep = {
+			name: name,
+			internal: internal,
+			num_children: 0,
+			layer: lpos,
+			layer_id: layer.id,
+			layer_type: layer_type,
+			layer_parent: layer.parent == null ? -1 : layer.parent.id,
+			object: opos,
+			material: mpos,
+			brush: bpos,
+			layer_opacity: layer.maskOpacity,
+			layer_object: layer.objectMask,
+			layer_blending: layer.blending
+		};
+
+		return step;
 	}
 
 	static function redoMergeLayers() {
@@ -614,6 +671,12 @@ class History {
 	static function swapActive() {
 		var undoLayer = undoLayers[undoI];
 		undoLayer.swap(Context.layer);
+		undoI = (undoI + 1) % Config.raw.undo_steps;
+	}
+
+	static function swapActive2(l: LayerSlot) {
+		var undoLayer = undoLayers[undoI];
+		undoLayer.swap(l);
 		undoI = (undoI + 1) % Config.raw.undo_steps;
 	}
 
@@ -657,11 +720,23 @@ class History {
 		@:privateAccess UINodes.inst.getNodes().handle = new zui.Zui.Handle();
 		UINodes.inst.hwnd.redraws = 2;
 	}
+
+	static function begin(name: String, layer: LayerSlot = null) {
+		stepStack.add(prepareStep(name, layer));
+	}
+
+	public static function end() {
+		var step = stepStack.pop();
+		push2(step); // The step itself should be added last
+	}
 }
 
 typedef TStep = {
 	public var name: String;
+	public var internal: Bool;
+	public var num_children: Int;
 	public var layer: Int;
+	public var layer_id: Int;
 	public var layer_type: LayerSlotType;
 	public var layer_parent: Int;
 	public var object: Int;

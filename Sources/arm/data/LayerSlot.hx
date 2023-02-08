@@ -42,20 +42,29 @@ class LayerSlot {
 	public var paintSubs = true;
 	public var decalMat = iron.math.Mat4.identity(); // Decal layer
 
-	public function new(ext = "", type = SlotLayer, parent: LayerSlot = null) {
+	public static var lastId = 0;
+
+	public function new(ext = "", type = SlotLayer, parent: LayerSlot = null, id: Int = -1) {
 		if (ext == "") {
-			id = 0;
-			for (l in Project.layers) if (l.id >= id) id = l.id + 1;
-			ext = id + "";
+			if (id < 0) {
+				// TODO: this is just a monotonically increasing id. It probably shouldn't be used
+				// in UI. A good practice is to have different increasing IDs for different kinds of
+				// layers, ie. Group 1, Layer 1, Layer 2, Group 2, Layer 3, Mask 1 etc.
+				this.id = lastId;
+				lastId += 1;
+			} else {
+				this.id = id;
+			}
+			ext = this.id + "";
 		}
 		this.ext = ext;
 		this.parent = parent;
 
 		if (type == SlotGroup) {
-			name = "Group " + (id + 1);
+			name = "Group " + (this.id + 1);
 		}
 		else if (type == SlotLayer) {
-			name = "Layer " + (id + 1);
+			name = "Layer " + (this.id + 1);
 			var format = App.bitsHandle.position == Bits8  ? "RGBA32" :
 						 App.bitsHandle.position == Bits16 ? "RGBA64" :
 						 									 "RGBA128";
@@ -88,7 +97,7 @@ class LayerSlot {
 			texpaint_preview = Image.createRenderTarget(RenderUtil.layerPreviewSize, RenderUtil.layerPreviewSize, TextureFormat.RGBA32);
 		}
 		else { // Mask
-			name = "Mask " + (id + 1);
+			name = "Mask " + (this.id + 1);
 			var format = "RGBA32"; // Full bits for undo support, R8 is used
 			blending = BlendAdd;
 
@@ -161,6 +170,9 @@ class LayerSlot {
 			var _texpaint_preview = texpaint_preview;
 			texpaint_preview = other.texpaint_preview;
 			other.texpaint_preview = _texpaint_preview;
+			var _fill_layer = fill_layer;
+			fill_layer = other.fill_layer;
+			other.fill_layer = _fill_layer;
 		}
 
 		if (isLayer() && other.isLayer()) {
@@ -219,6 +231,16 @@ class LayerSlot {
 	}
 
 	public function applyMask() {
+		// First, we back up the current mask layer, then we back up parent, then we mark the layer 
+		// with the applied mask for deletion.
+		// This is done in this order because the undo system will replay these steps in reverse order,
+		// and if we restore the mask after we delete the resulting layer the mask will be deleted too
+		// because its parent is still set to resulting layer. Also, parent layer should exist when the
+		// mask is restored.
+		History.beginApplyMask();
+		History.deleteLayer2(this);
+		History.applyMask(parent);
+
 		if (parent.fill_layer != null) {
 			parent.toPaintLayer();
 		}
@@ -231,6 +253,7 @@ class LayerSlot {
 			Layers.applyMask(parent, this);
 		}
 		delete();
+		History.end();
 	}
 
 	public function duplicate(): LayerSlot {
@@ -361,6 +384,10 @@ class LayerSlot {
 		}
 	}
 
+	// TODO: these are used internally by several methods but don't
+	// record undo steps for themselves. I've added a hack that copies
+	// fill_layer when swapping as a stop-gap measure, but there's no
+	// guarantee that it actually works correctly.
 	public function toFillLayer() {
 		Context.setLayer(this);
 		fill_layer = Context.material;
@@ -628,5 +655,14 @@ class LayerSlot {
 		}
 
 		for (m in Project.materials) TabLayers.remapLayerPointers(m.canvas.nodes, TabLayers.fillLayerMap(pointers));
+	}
+
+	public static function findById(id: Int): LayerSlot {
+		for (l in Project.layers) {
+			if (l.id == id) {
+				return l;
+			}
+		}
+		return null;
 	}
 }
